@@ -1,0 +1,17 @@
+.env
+state/queue.json
+state/queue.lock
+state/skill_running.lock
+state/last_seen.json
+state/regression_results.jsonl
+state/result_queue.jsonl
+state/build_result.json
+state/browser_opened.flag
+state/main.pid
+logs/
+results.html
+__pycache__/
+*.pyc
+*.pyo
+*.md.bak
+.claude/
