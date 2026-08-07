@@ -1,6 +1,6 @@
 # commit-skill-runner
 
-Monitors one or more GitHub branches for new commits and automatically runs a configured pipeline of skills on each one. Results are displayed in a live-updating browser page.
+Monitors GitHub repository commits and automatically runs a configured pipeline of skills on each new commit. Results are displayed in a live-updating browser page.
 
 ## Architecture
 
