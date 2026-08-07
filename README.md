@@ -40,22 +40,16 @@ Skills live in `skills/`. Two formats are supported:
 
 See `CLAUDE.md` for the full skill authoring contract.
 
-### Built-in skills
-
-| Skill | What it does |
-|-------|-------------|
-| `compile_ui_bll` | Checkout commit, build BLL and UI in parallel |
-| `ccl_regression_test_skill` | Configure and run CCL DUT regression test |
-| `ccl_py_test_skill` | Sync py-test repo to main, run Python test suite |
+Skills are repo-specific — you write the skills that match your project's build and test workflow. The `SKILL_LIST` in `.env` controls which skills run and in what order.
 
 ## Configuration (`.env`)
+
+Copy `.env.example` to `.env` and fill in the values for your project.
 
 | Variable | Description |
 |----------|-------------|
 | `GITHUB_TOKEN` | Personal access token for GitHub API |
 | `WATCH_TARGETS` | `owner/repo:branch[:path1,path2]` — pipe-separated |
-| `SKILL_LIST` | Comma-separated skill names to run per commit |
-| `STC_BUILD_ROOT` | Path to testcenter repo (compile_ui_bll) |
-| `AUTOTEST_ROOT` | Path to TestCenter-AutoTest (ccl_regression_test_skill) |
-| `PY_TEST_REPO` | Path to py-test repo (ccl_py_test_skill) |
-| `PY_TEST_CMD` | Command to launch the Python test suite |
+| `SKILL_LIST` | Comma-separated skill names to run per commit (in order) |
+
+Any additional variables are skill-specific — each skill reads whatever it needs from the environment. See the skills in `skills/` and `.env.example` for examples.
