@@ -49,11 +49,9 @@ def run_test():
         exit_code = proc.returncode
         log.info("pytest exited  rc=%d", exit_code)
         if proc.stdout:
-            log.info("pytest stdout (last 4000 chars):
-%s", proc.stdout[-4000:])
+            log.info("pytest stdout (last 4000): %s", proc.stdout[-4000:])
         if proc.stderr:
-            log.warning("pytest stderr (last 2000 chars):
-%s", proc.stderr[-2000:])
+            log.warning("pytest stderr (last 2000): %s", proc.stderr[-2000:])
     except subprocess.TimeoutExpired:
         return {"label": "py test result", "result": "fail", "detail": "timeout after 7200s"}
     except Exception as e:
@@ -77,11 +75,11 @@ def run_test():
                 return {"label": "py test result", "result": str(newest_dir)}
             else:
                 return {"label": "py test result", "result": "fail",
-                        "detail": f"pytest exit {exit_code}, output at {newest_dir}"}
+                        "detail": "pytest exit %d, output at %s" % (exit_code, newest_dir)}
 
     if exit_code != 0:
         return {"label": "py test result", "result": "fail",
-                "detail": f"pytest exit {exit_code}, no output directory"}
+                "detail": "pytest exit %d, no output directory" % exit_code}
     return {"label": "py test result", "result": "pass", "detail": "no output directory created"}
 
 
