@@ -1,6 +1,7 @@
 """ccl_py_test_skill — sync Python test repo and run the test suite."""
 import logging
 import os
+import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,24 @@ def git_sync():
     except Exception as e:
         return {"label": "git sync", "result": "fail", "detail": str(e)}
 
+
+
+def setup_deps():
+    cmd = os.environ.get("PY_TEST_CMD", "").strip()
+    m = re.search(r'"([^"]+\.exe)"', cmd, re.IGNORECASE)
+    if not m:
+        return {"label": "setup deps", "result": "pass", "detail": "no python exe in cmd"}
+    python = m.group(1)
+    try:
+        r = subprocess.run([python, "-m", "pip", "install", "psycopg2-binary", "-q"],
+                           capture_output=True, text=True, timeout=120)
+        if r.returncode == 0:
+            log.info("psycopg2-binary OK")
+        else:
+            log.warning("pip install psycopg2-binary failed: %s", r.stderr[-300:])
+    except Exception as e:
+        log.warning("pip install error: %s", e)
+    return {"label": "setup deps", "result": "pass"}
 
 def run_test():
     repo = os.environ.get("PY_TEST_REPO", "").strip()
@@ -86,5 +105,6 @@ def run_test():
 def steps():
     return [
         ("## Step 1 — Git Sync", git_sync),
-        ("## Step 2 — Run Test", run_test),
+        ("## Step 2 — Setup Deps", setup_deps),
+        ("## Step 3 — Run Test", run_test),
     ]
