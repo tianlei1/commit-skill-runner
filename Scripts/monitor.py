@@ -166,6 +166,7 @@ def check_target(target, state, github_token):
         else:
             log.error("[%s] Failed to enqueue %s", label, c["sha"][:8])
 
+    state[label] = latest_sha
     log.info("[%s] %d enqueued, queue size now: %d.", label, enqueued, queue_store.size())
     return True
 
