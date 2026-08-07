@@ -1,6 +1,6 @@
 # commit-skill-runner
 
-Monitors a GitHub branch for CCL-related commits and automatically runs a configured pipeline of skills on each one. Results are displayed in a live-updating browser page.
+Monitors one or more GitHub branches for new commits and automatically runs a configured pipeline of skills on each one. Results are displayed in a live-updating browser page.
 
 ## Architecture
 
