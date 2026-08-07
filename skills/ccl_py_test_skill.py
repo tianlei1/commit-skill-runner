@@ -1,94 +1,92 @@
-"""ccl_py_test_skill.py — Sync py test repo to main and run the Python test suite."""
+"""ccl_py_test_skill — sync Python test repo and run the test suite."""
 import logging
 import os
 import subprocess
-import time
+from datetime import datetime
 from pathlib import Path
 
 log = logging.getLogger("ccl_py_test_skill")
 
-_PY_TEST_REPO = Path(os.environ.get("PY_TEST_REPO", ""))
-_PY_TEST_CMD  = os.environ.get("PY_TEST_CMD", "")
-_PID_FILE     = _PY_TEST_REPO / ".run_tests.pid" if _PY_TEST_REPO else Path(".run_tests.pid")
-
-_test_proc       = None   # set by launch_and_wait, for module-lifetime access if needed
-_test_started_at = None
-
 
 def git_sync():
-    """Fetch origin and reset to origin/main."""
-    if not _PY_TEST_REPO.exists():
-        return {"label": "git sync", "result": "fail", "detail": f"PY_TEST_REPO not found: {_PY_TEST_REPO}"}
-
-    r = subprocess.run(
-        ["git", "-C", str(_PY_TEST_REPO), "fetch", "origin"],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        return {"label": "git sync", "result": "fail", "detail": r.stderr.strip()}
-
-    r = subprocess.run(
-        ["git", "-C", str(_PY_TEST_REPO), "reset", "--hard", "origin/main"],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        return {"label": "git sync", "result": "fail", "detail": r.stderr.strip()}
-
-    return {"label": "git sync", "result": "pass"}
+    repo = os.environ.get("PY_TEST_REPO", "").strip()
+    if not repo:
+        return {"label": "git sync", "result": "fail", "detail": "PY_TEST_REPO not set"}
+    try:
+        r = subprocess.run(["git", "-C", repo, "fetch", "origin"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return {"label": "git sync", "result": "fail", "detail": r.stderr.strip()}
+        r = subprocess.run(["git", "-C", repo, "reset", "--hard", "origin/main"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return {"label": "git sync", "result": "fail", "detail": r.stderr.strip()}
+        return {"label": "git sync", "result": "pass"}
+    except Exception as e:
+        return {"label": "git sync", "result": "fail", "detail": str(e)}
 
 
-def launch_and_wait():
-    """Launch the test process, wait for it to finish, return the HTML report path."""
-    global _test_proc, _test_started_at
-
-    if not _PY_TEST_CMD:
+def run_test():
+    repo = os.environ.get("PY_TEST_REPO", "").strip()
+    cmd  = os.environ.get("PY_TEST_CMD",  "").strip()
+    if not repo:
+        return {"label": "py test result", "result": "fail", "detail": "PY_TEST_REPO not set"}
+    if not cmd:
         return {"label": "py test result", "result": "fail", "detail": "PY_TEST_CMD not set"}
 
-    # ── Launch ─────────────────────────────────────────────────────────────────
-    _PID_FILE.unlink(missing_ok=True)
-    _test_started_at = time.time()
+    started_at = datetime.now()
+    log.info("Running pytest  cmd=%s", cmd)
     try:
-        _test_proc = subprocess.Popen(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", _PY_TEST_CMD],
-            cwd=str(_PY_TEST_REPO),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
+            cwd=repo,
+            timeout=7200,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
-        _PID_FILE.write_text(str(_test_proc.pid), encoding="utf-8")
-        log.info("Test started pid=%d", _test_proc.pid)
+        exit_code = proc.returncode
+        log.info("pytest exited  rc=%d", exit_code)
+        if proc.stdout:
+            log.info("pytest stdout (last 4000 chars):
+%s", proc.stdout[-4000:])
+        if proc.stderr:
+            log.warning("pytest stderr (last 2000 chars):
+%s", proc.stderr[-2000:])
+    except subprocess.TimeoutExpired:
+        return {"label": "py test result", "result": "fail", "detail": "timeout after 7200s"}
     except Exception as e:
         return {"label": "py test result", "result": "fail", "detail": str(e)}
 
-    time.sleep(5)
-    if _test_proc.poll() is not None and _test_proc.returncode != 0:
-        _PID_FILE.unlink(missing_ok=True)
+    runs_dir = Path(repo) / "runs"
+    if runs_dir.exists():
+        cutoff = started_at.timestamp() - 10
+        new_subdirs = []
+        for subdir in runs_dir.iterdir():
+            if not subdir.is_dir():
+                continue
+            try:
+                if subdir.stat().st_mtime >= cutoff:
+                    new_subdirs.append(subdir)
+            except OSError:
+                continue
+        if new_subdirs:
+            newest_dir = max(new_subdirs, key=lambda d: d.stat().st_mtime)
+            if exit_code == 0:
+                return {"label": "py test result", "result": str(newest_dir)}
+            else:
+                return {"label": "py test result", "result": "fail",
+                        "detail": f"pytest exit {exit_code}, output at {newest_dir}"}
+
+    if exit_code != 0:
         return {"label": "py test result", "result": "fail",
-                "detail": f"process crashed on startup (exit {_test_proc.returncode})"}
-
-    # ── Wait ───────────────────────────────────────────────────────────────────
-    log.info("Waiting for py test process (pid=%d) to finish", _test_proc.pid)
-    _test_proc.wait()
-    _PID_FILE.unlink(missing_ok=True)
-    log.info("py test process finished (exit=%d)", _test_proc.returncode)
-
-    # ── Collect result ─────────────────────────────────────────────────────────
-    reports_dir = _PY_TEST_REPO / "reports"
-    if not reports_dir.exists():
-        return {"label": "py test result", "result": "fail", "detail": "reports/ dir not found"}
-
-    cutoff = _test_started_at or 0.0
-    stamped = [(f.stat().st_mtime, f) for f in reports_dir.glob("*.html")]
-    recent = [(mtime, f) for mtime, f in stamped if mtime >= cutoff]
-    if not recent:
-        return {"label": "py test result", "result": "fail", "detail": "no HTML report found in reports/"}
-
-    _, report = max(recent)
-    log.info("py test report: %s", report)
-    return {"label": "py test result", "result": str(report)}
+                "detail": f"pytest exit {exit_code}, no output directory"}
+    return {"label": "py test result", "result": "pass", "detail": "no output directory created"}
 
 
 def steps():
     return [
-        ("## Step — Git Sync",   git_sync),
-        ("## Step — Run Test",   launch_and_wait),
+        ("## Step 1 — Git Sync", git_sync),
+        ("## Step 2 — Run Test", run_test),
     ]
