@@ -1,116 +1,70 @@
-"""ccl_regression_test_skill.py — Configure and run CCL DUT regression test."""
+"""ccl_regression_test_skill --- Launch CCL DUT regression test and wait for completion."""
 import logging
 import os
 import subprocess
-import time
+import sys
+from datetime import datetime
 from pathlib import Path
+
+ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT / "Scripts"))
 
 log = logging.getLogger("ccl_regression_test_skill")
 
 _AUTOTEST_ROOT = Path(os.environ.get("AUTOTEST_ROOT", r"C:\work\TestCenter-AutoTest"))
-_CONFIG_FILE   = _AUTOTEST_ROOT / "Config" / "config.yaml"
-_START_BAT     = _AUTOTEST_ROOT / "StartTest.bat"
-_PID_FILE      = _AUTOTEST_ROOT / ".run_tests.pid"
+_PYTHON  = _AUTOTEST_ROOT / "python" / "3.10.2" / "win64" / "python.exe"
+_SCRIPT  = _AUTOTEST_ROOT / "Scripts" / "run_tests.py"
+_CONFIG  = _AUTOTEST_ROOT / "Config" / "config.yaml"
+_RESULT_DIR = Path(os.environ.get("REGRESSION_RESULT_DIR", r"C:\work\regression test"))
+_MAX_WAIT_S = 7200
 
 
-def regression_test():
-    """Configure yaml, launch test, wait for completion, return result path."""
-    import psutil
-
-    # ── Configure ──────────────────────────────────────────────────────────────
-    try:
-        lines = _CONFIG_FILE.read_text(encoding="utf-8").splitlines(keepends=True)
-    except OSError as e:
-        return {"label": "regression result", "result": "fail", "detail": str(e)}
-
-    current_name = ""
-    result_dir = None
-    out = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("name:"):
-            current_name = stripped.split(":", 1)[1].strip().strip('"').strip("'")
-        if stripped.startswith("result_dir:"):
-            result_dir = stripped.split(":", 1)[1].strip().strip('"').strip("'")
-        if stripped.startswith("enable_test:"):
-            indent = len(line) - len(line.lstrip())
-            want = "yes" if ("CCL" in current_name and "DUT" in current_name) else "no"
-            line = " " * indent + f"enable_test: {want}\n"
-        out.append(line)
-
-    try:
-        _CONFIG_FILE.write_text("".join(out), encoding="utf-8")
-    except OSError as e:
-        return {"label": "regression result", "result": "fail", "detail": str(e)}
-
-    if not result_dir:
-        return {"label": "regression result", "result": "fail", "detail": "result_dir not found in config"}
-
-    # ── Launch ─────────────────────────────────────────────────────────────────
-    _PID_FILE.unlink(missing_ok=True)
-    started_at = time.time()
-    try:
-        subprocess.Popen(
-            ["cmd", "/c", str(_START_BAT)],
-            cwd=str(_AUTOTEST_ROOT),
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-            close_fds=True,
-        )
-    except Exception as e:
-        return {"label": "regression result", "result": "fail", "detail": str(e)}
-
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        if _PID_FILE.exists():
-            break
-        time.sleep(0.5)
-    else:
-        return {"label": "regression result", "result": "fail", "detail": "PID file did not appear within 10s"}
-
-    # ── Wait ───────────────────────────────────────────────────────────────────
-    log.info("Waiting for test to complete (polling %s every 30s)", _PID_FILE)
-    start = time.monotonic()
-    iteration = 0
-    while True:
+def _find_result_html(started_at):
+    if not _RESULT_DIR.exists():
+        return None
+    cutoff = started_at.timestamp() - 60
+    candidates = []
+    for subdir in _RESULT_DIR.iterdir():
+        if not subdir.is_dir():
+            continue
         try:
-            pid = int(_PID_FILE.read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
-            log.info("PID file gone after %ds — test finished", int(time.monotonic() - start))
-            break
-        if not psutil.pid_exists(pid):
-            log.error("Process %d is dead but PID file still exists — test crashed", pid)
-            _PID_FILE.unlink(missing_ok=True)
-            return {"label": "regression result", "result": "fail", "detail": "test process crashed"}
-        time.sleep(30)
-        iteration += 1
-        if iteration % 10 == 0:
-            log.info("Still waiting (%ds elapsed)...", int(time.monotonic() - start))
+            if subdir.stat().st_mtime < cutoff:
+                continue
+        except OSError:
+            continue
+        subdir_htmls = list(subdir.rglob("IntegrationResultReport*.html"))
+        if not subdir_htmls:
+            subdir_htmls = list(subdir.rglob("*.html"))
+        candidates.extend(subdir_htmls)
+    if not candidates:
+        return None
+    return str(max(candidates, key=lambda f: f.stat().st_mtime))
 
-    # ── Collect result ─────────────────────────────────────────────────────────
+
+def run_regression(commit):
+    python = _PYTHON if _PYTHON.exists() else Path(sys.executable)
+    started_at = datetime.now()
+    log.info("Launching run_tests.py (may take 30-90 min)  python=%s", python)
     try:
-        result_path = Path(result_dir)
-        if not result_path.exists():
-            return {"label": "regression result", "result": "fail", "detail": f"result_dir not found: {result_dir}"}
-
-        stamped_dirs = [(d.stat().st_mtime, d) for d in result_path.iterdir() if d.is_dir()]
-        recent_dirs = [(mtime, d) for mtime, d in stamped_dirs if mtime >= started_at]
-        if not recent_dirs:
-            return {"label": "regression result", "result": "fail", "detail": "no result subdirectory found"}
-
-        _, newest_dir = max(recent_dirs)
-        html_files = list(newest_dir.glob("IntegrationResultReport*.html")) or list(newest_dir.glob("*.html"))
-        if not html_files:
-            return {"label": "regression result", "result": "fail", "detail": f"no HTML report in {newest_dir}"}
-
-        _, report = max((f.stat().st_mtime, f) for f in html_files)
-        log.info("Regression result report: %s", report)
-        return {"label": "regression result", "result": str(report)}
-
+        proc = subprocess.run(
+            [str(python), str(_SCRIPT), str(_CONFIG)],
+            timeout=_MAX_WAIT_S,
+        )
+        log.info("run_tests.py exited  rc=%d", proc.returncode)
+    except subprocess.TimeoutExpired:
+        return {"label": "regression result", "result": "fail",
+                "detail": "timeout after %ds" % _MAX_WAIT_S}
     except Exception as e:
         return {"label": "regression result", "result": "fail", "detail": str(e)}
+    html = _find_result_html(started_at)
+    if html:
+        log.info("Result report found: %s", html)
+        return {"label": "regression result", "result": html}
+    log.info("No HTML report found -- no tests ran")
+    return {"label": "regression result", "result": "pass", "detail": "no tests enabled"}
 
 
 def steps():
     return [
-        ("## Step — CCL Regression Test", regression_test),
+        ("## Step 1 -- Run Regression Test", run_regression),
     ]

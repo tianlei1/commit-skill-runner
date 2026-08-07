@@ -35,8 +35,26 @@ def _spawn(name):
     return p
 
 
+
+def _check_single_instance():
+    if not PID_FILE.exists():
+        return
+    try:
+        stored_pid = int(PID_FILE.read_text(encoding='utf-8').strip())
+    except Exception:
+        return
+    if stored_pid == os.getpid():
+        return
+    import subprocess as _sp
+    r = _sp.run(['tasklist', '/fi', 'PID eq %d' % stored_pid, '/fo', 'csv', '/nh'],
+                capture_output=True, text=True)
+    if str(stored_pid) in r.stdout:
+        print('Another main.py is already running (pid=%d). Exiting.' % stored_pid)
+        raise SystemExit(0)
+
 def main():
     logging_utils.setup_logging(LOG_FILE, "main")
+    _check_single_instance()
     log.info("commit-skill-runner starting  pid=%d", os.getpid())
 
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -53,7 +71,10 @@ def main():
                         name, p.returncode, RESTART_DELAY,
                     )
                     time.sleep(RESTART_DELAY)
-                    procs[name] = _spawn(name)
+                    try:
+                        procs[name] = _spawn(name)
+                    except Exception as e:
+                        log.error("Failed to restart %s: %s — will retry next cycle", name, e)
             time.sleep(5)
     except KeyboardInterrupt:
         log.info("Shutting down...")
