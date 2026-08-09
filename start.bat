@@ -19,7 +19,7 @@ if "%ALREADY_RUNNING%"=="1" (
     start "commit-skill-runner" /min "%PYTHON%" "%ROOT%Scripts\main.py"
     echo Bot started in background window.
     timeout /t 2 /nobreak >nul
-    start "" "%ROOT%results.html"
+    start "" "http://localhost:8099"
     echo Results page opened in browser.
 )
 endlocal
