@@ -30,8 +30,12 @@ def checkout(commit):
         return {"label": "checkout", "result": "fail", "detail": "TESTCENTER_REPO not set in .env"}
     sha = commit["sha"]
     _remove_stale_lock()
-    log.info("Checking out %s in %s", sha, _REPO)
+    log.info("Fetching origin in %s", _REPO)
     try:
+        rf = subprocess.run(["git", "-C", _REPO, "fetch", "origin"],
+                            capture_output=True, text=True)
+        if rf.returncode != 0:
+            return {"label": "checkout", "result": "fail", "detail": rf.stderr.strip()}
         r1 = subprocess.run(["git", "-C", _REPO, "checkout", "-f", sha],
                             capture_output=True, text=True)
         r2 = subprocess.run(["git", "-C", _REPO, "restore", "."],
