@@ -14,18 +14,20 @@ import html_reporter
 log = logging.getLogger("compile_ui_bll_skill")
 
 _SKILL_NAME = "compile_ui_bll_skill"
-_REPO = os.environ.get("STC_BUILD_ROOT", r"C:\work\testcenter")
-_LOCK = Path(_REPO) / ".git" / "index.lock"
+_REPO = os.environ.get("TESTCENTER_REPO", "")
+_LOCK = Path(_REPO) / ".git" / "index.lock" if _REPO else None
 LOG_DIR = ROOT / "logs"
 
 
 def _remove_stale_lock():
-    if _LOCK.exists():
+    if _LOCK and _LOCK.exists():
         log.warning("Removing stale git index.lock before checkout")
         _LOCK.unlink(missing_ok=True)
 
 
 def checkout(commit):
+    if not _REPO:
+        return {"label": "checkout", "result": "fail", "detail": "TESTCENTER_REPO not set in .env"}
     sha = commit["sha"]
     _remove_stale_lock()
     log.info("Checking out %s in %s", sha, _REPO)
