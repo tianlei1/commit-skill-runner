@@ -4,6 +4,12 @@ set "ROOT=%~dp0"
 set "PYTHON=python"
 set "PIDFILE=%ROOT%state\main.pid"
 
+%PYTHON% -c "import psutil, dotenv, requests" >nul 2>&1
+if errorlevel 1 (
+    echo Installing missing dependencies...
+    %PYTHON% -m pip install psutil python-dotenv requests -q
+)
+
 set "ALREADY_RUNNING=0"
 if exist "%PIDFILE%" (
     set /p STORED_PID=<"%PIDFILE%"
