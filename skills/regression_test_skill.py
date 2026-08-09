@@ -1,4 +1,4 @@
-"""ccl_regression_test_skill --- Launch CCL DUT regression test and wait for completion."""
+"""regression_test_skill --- Launch CCL DUT regression test and wait for completion."""
 import logging
 import os
 import subprocess
@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "Scripts"))
 
-log = logging.getLogger("ccl_regression_test_skill")
+log = logging.getLogger("regression_test_skill")
 
 _AUTOTEST_ROOT = Path(os.environ.get("AUTOTEST_ROOT", r"C:\work\TestCenter-AutoTest"))
 _PYTHON  = _AUTOTEST_ROOT / "python" / "3.10.2" / "win64" / "python.exe"
@@ -56,12 +56,18 @@ def run_regression(commit):
                 "detail": "timeout after %ds" % _MAX_WAIT_S}
     except Exception as e:
         return {"label": "regression result", "result": "fail", "detail": str(e)}
+    ok = proc.returncode == 0
     html = _find_result_html(started_at)
     if html:
         log.info("Result report found: %s", html)
-        return {"label": "regression result", "result": html}
-    log.info("No HTML report found -- no tests ran")
-    return {"label": "regression result", "result": "pass", "detail": "no tests enabled"}
+    else:
+        log.info("No HTML report found")
+    payload = {"label": "regression result", "result": "pass" if ok else "fail"}
+    if html:
+        payload["link"] = html
+    if not ok and not html:
+        payload["detail"] = f"exited rc={proc.returncode}"
+    return payload
 
 
 def steps():

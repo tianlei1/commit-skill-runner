@@ -9,7 +9,6 @@ import subprocess
 import importlib.util
 from pathlib import Path
 
-import psutil
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
@@ -25,10 +24,6 @@ LOG_FILE = ROOT / "logs" / "skill_runner.log"
 RUNNING_LOCK = ROOT / "state" / "skill_running.lock"
 LAST_SEEN = ROOT / "state" / "last_seen.json"
 POLL_INTERVAL = 30
-
-_WAIT_FOR_PID_PREFIX = "WAIT_FOR_PID:"
-_PID_POLL_INTERVAL = 30   # seconds
-
 
 log = logging.getLogger("skill_runner")
 
@@ -108,7 +103,9 @@ def _run_py_skill(skill, commit):
             raise RuntimeError(f"Skill '{skill_name}' returned no steps")
 
         for step_header, step_fn in step_list:
-            html_reporter.record_step_start(commit, skill_name, step_header)
+            parallel = getattr(step_fn, "parallel", False)
+            if not parallel:
+                html_reporter.record_step_start(commit, skill_name, step_header)
             log.info("Running step: %s / %s", skill_name, step_header)
 
             try:
@@ -117,7 +114,8 @@ def _run_py_skill(skill, commit):
             except Exception as e:
                 payload = {"label": step_header, "result": "fail", "detail": str(e)}
 
-            html_reporter.record_step_result(commit, skill_name, payload)
+            if not parallel:
+                html_reporter.record_step_result(commit, skill_name, payload)
             log.info("Step '%s / %s' → %s", skill_name, step_header, payload.get("result"))
 
             if payload.get("result", "").lower() in ("fail", "failed"):
@@ -137,8 +135,8 @@ def _any_failed(results):
 
 
 def _run_claude(prompt, commit, skill_name=None):
-    """Run Claude with prompt, handle RESULT: and WAIT_FOR_PID: lines.
-    Returns (wait_for_pid, results) where results is a list of captured RESULT payloads.
+    """Run Claude with prompt, capture RESULT: lines from stdout.
+    Returns a list of captured RESULT payloads.
     Blocks until Claude exits — do not call from a background thread."""
     proc = subprocess.Popen(
         ["claude", "--print", "--dangerously-skip-permissions",
@@ -149,10 +147,10 @@ def _run_claude(prompt, commit, skill_name=None):
         text=True,
         encoding="utf-8",
         errors="replace",
+        close_fds=True,
     )
     proc.stdin.write(prompt)
     proc.stdin.close()
-    wait_for_pid = None
     results = []
     for line in proc.stdout:
         line = line.rstrip("\n")
@@ -164,49 +162,15 @@ def _run_claude(prompt, commit, skill_name=None):
                 payload = json.loads(raw)
                 if skill_name:
                     html_reporter.record_step_result(commit, skill_name, payload)
-                else:
-                    html_reporter.record_skill_result({"sha": commit["sha"], "short_sha": commit["short_sha"], "author": commit.get("author", "unknown"), "repo": commit.get("repo", ""), **payload})
                 results.append(payload)
                 log.info("Captured result: %s", raw)
             except json.JSONDecodeError as e:
                 log.warning("Invalid RESULT line: %s — %s", raw, e)
-        elif line.startswith(_WAIT_FOR_PID_PREFIX):
-            pid_path = line[len(_WAIT_FOR_PID_PREFIX):].strip()
-            if wait_for_pid is not None:
-                log.warning("Duplicate WAIT_FOR_PID ignored: %s", pid_path)
-            else:
-                wait_for_pid = pid_path
-                log.info("Received WAIT_FOR_PID: %s", wait_for_pid)
         else:
             log.info("[claude] %s", line)
     proc.wait()
-    return wait_for_pid, results
+    return results
 
-
-def _pid_alive(pid):
-    return psutil.pid_exists(pid)
-
-
-def _poll_pid_file(pid_file):
-    """Block until pid_file disappears or the process inside it dies. Returns True if clean exit."""
-    pid_path = Path(pid_file)
-    log.info("Polling PID file every %ds: %s", _PID_POLL_INTERVAL, pid_path)
-    start = time.monotonic()
-    iteration = 0
-    while True:
-        try:
-            pid = int(pid_path.read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
-            log.info("PID file gone after %ds", int(time.monotonic() - start))
-            return True
-        if not _pid_alive(pid):
-            log.error("Process %d is dead but PID file still exists — test crashed", pid)
-            pid_path.unlink(missing_ok=True)
-            return False
-        time.sleep(_PID_POLL_INTERVAL)
-        iteration += 1
-        if iteration % 10 == 0:
-            log.info("Still waiting for test to finish (%ds elapsed)...", int(time.monotonic() - start))
 
 
 def _parse_skill_steps(content):
@@ -239,8 +203,8 @@ def _build_step_prompt(preamble, step_header, step_body, commit):
         "## CRITICAL — Single-step execution only\n\n"
         "You are executing EXACTLY ONE step. Do NOT run any other steps, regardless of what the skill description says.\n"
         "1. Run ONLY the commands listed in the step below.\n"
-        "2. Print the required protocol line (either `RESULT: {...}` or `WAIT_FOR_PID: <path>`) "
-        "as specified in that step — as a bare, standalone line with no surrounding text, explanation, or commentary.\n"
+        "2. Print the required `RESULT: {...}` line as specified in that step — "
+        "as a bare, standalone line with no surrounding text, explanation, or commentary.\n"
         "3. Do NOT describe what you did in prose. The protocol line is the ONLY output after running commands.\n"
         "4. STOP immediately after printing the protocol line — do not run anything else.\n\n"
         "You will be invoked again separately for each subsequent step. "
@@ -254,98 +218,6 @@ def _build_step_prompt(preamble, step_header, step_body, commit):
     parts.append(commit_section)
     return "\n\n---\n\n".join(parts)
 
-
-def _build_regression_parse_prompt(commit, test_started_at):
-    autotest_root = os.environ.get("AUTOTEST_ROOT", "")
-    return (
-        "The CCL DUT regression test has completed.\n\n"
-        f"1. Read `{autotest_root}\\Config\\config.yaml` to find the `result_dir` field.\n"
-        f"2. Find the newest subdirectory inside `result_dir` that was created after {test_started_at}.\n"
-        "3. Find the HTML result report file (e.g. `IntegrationResultReport.html`) in that directory.\n"
-        "4. Print exactly one line to stdout and nothing else:\n\n"
-        '   RESULT: {"label": "regression result", "result": "<full_path_to_html>"}\n\n'
-        "   Or if the HTML is not found:\n\n"
-        '   RESULT: {"label": "regression result", "result": "fail"}\n\n'
-        "## Commit to process\n\n"
-        "```json\n"
-        + json.dumps(commit, indent=2)
-        + "\n```"
-    )
-
-
-def _build_py_test_parse_prompt(commit, test_started_at):
-    py_test_repo = os.environ.get("PY_TEST_REPO", "")
-    return (
-        "The Python test suite has completed.\n\n"
-        f"1. Find the newest `.html` file inside `{py_test_repo}\\reports\\` "
-        f"that was created after {test_started_at}.\n"
-        "2. Print exactly one line to stdout and nothing else:\n\n"
-        '   RESULT: {"label": "py test result", "result": "<full_path_to_report.html>"}\n\n'
-        "   Or if no HTML report is found:\n\n"
-        '   RESULT: {"label": "py test result", "result": "fail"}\n\n'
-        "## Commit to process\n\n"
-        "```json\n"
-        + json.dumps(commit, indent=2)
-        + "\n```"
-    )
-
-
-def _build_compile_parse_prompt(commit):
-    result_file = str(ROOT / "state" / "build_result.json")
-    return (
-        "The BLL and UI build has completed.\n\n"
-        f"1. Read `{result_file}`.\n"
-        "2. Check the `bll_exit` and `ui_exit` values.\n"
-        "3. Print the result lines and nothing else:\n\n"
-        '   RESULT: {"label": "bd bll", "result": "pass"}  — if bll_exit == 0\n'
-        '   RESULT: {"label": "bd bll", "result": "fail"}  — if bll_exit != 0\n'
-        '   RESULT: {"label": "bd ui", "result": "pass"}   — if ui_exit == 0\n'
-        '   RESULT: {"label": "bd ui", "result": "fail"}   — if ui_exit != 0 and ui_exit != -1\n\n'
-        "   If ui_exit is -1, BLL failed so UI was skipped — print only the BLL result line.\n\n"
-        "## Commit to process\n\n"
-        "```json\n"
-        + json.dumps(commit, indent=2)
-        + "\n```"
-    )
-
-
-def _wait_for_test_and_parse(commit, wait_for_pid, skill_name):
-    """Block until the test PID file disappears, then invoke Claude to parse results.
-    Raises RuntimeError on failure. This call blocks for the full test duration."""
-    test_started_at = time.strftime("%Y-%m-%d %H:%M:%S")
-    gone = _poll_pid_file(wait_for_pid)
-
-    if skill_name and "compile_ui_bll" in skill_name:
-        crash_label  = "bd bll"
-        parse_prompt = _build_compile_parse_prompt(commit)
-        parse_step   = "## Step — parse build results"
-    elif skill_name and "py_test" in skill_name:
-        crash_label  = "py test result"
-        parse_prompt = _build_py_test_parse_prompt(commit, test_started_at)
-        parse_step   = "## Step — parse py test results"
-    else:
-        crash_label  = "regression result"
-        parse_prompt = _build_regression_parse_prompt(commit, test_started_at)
-        parse_step   = "## Step — parse results"
-
-    if not gone:
-        html_reporter.record_step_result(commit, skill_name, {
-            "label": crash_label,
-            "result": "fail",
-            "detail": "process crashed without cleaning up PID file",
-        })
-        raise RuntimeError("Test process died — stopping skill chain")
-
-    log.info("Test complete — invoking Claude to parse results (blocking until done)")
-    html_reporter.record_step_start(commit, skill_name, parse_step)
-    _, parse_results = _run_claude(parse_prompt, commit, skill_name=skill_name)
-    if not parse_results:
-        raise RuntimeError(
-            "Result parsing produced no RESULT lines — "
-            "cannot determine test outcome; not proceeding to next skill"
-        )
-    if _any_failed(parse_results):
-        raise RuntimeError("Result parsing reported failure — stopping skill chain")
 
 
 def _run_md_skill(skill, commit):
@@ -368,13 +240,13 @@ def _run_md_skill(skill, commit):
 
             html_reporter.record_step_start(commit, skill["name"], step_header)
             log.info("Invoking Claude for step: %s (blocking until result received)", step_label)
-            wait_for_pid, results = _run_claude(prompt, commit, skill_name=skill["name"])
+            results = _run_claude(prompt, commit, skill_name=skill["name"])
 
-            if not results and not wait_for_pid:
+            if not results:
                 fail_payload = {"label": "no output", "result": "fail"}
                 html_reporter.record_step_result(commit, skill["name"], fail_payload)
                 raise RuntimeError(
-                    f"Step '{step_label}' produced neither RESULT nor WAIT_FOR_PID — "
+                    f"Step '{step_label}' produced no RESULT — "
                     "cannot determine outcome; not proceeding to next step"
                 )
 
@@ -382,13 +254,6 @@ def _run_md_skill(skill, commit):
                 raise RuntimeError(
                     f"Step '{step_label}' failed — stopping skill chain"
                 )
-
-            log.info("Step '%s' passed with %d result(s)", step_label, len(results))
-
-            if wait_for_pid:
-                _wait_for_test_and_parse(commit, wait_for_pid, skill["name"])
-                html_reporter.record_skill_pass(commit, skill["name"])
-                return
 
         html_reporter.record_skill_pass(commit, skill["name"])
 

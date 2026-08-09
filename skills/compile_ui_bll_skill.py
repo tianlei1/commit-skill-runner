@@ -1,4 +1,4 @@
-"""compile_ui_bll.py — Checkout commit, then build BLL and UI in parallel."""
+"""compile_ui_bll_skill.py — Checkout commit, then build BLL and UI in parallel."""
 import logging
 import os
 import subprocess
@@ -11,9 +11,9 @@ sys.path.insert(0, str(ROOT / "Scripts"))
 
 import html_reporter
 
-log = logging.getLogger("compile_ui_bll")
+log = logging.getLogger("compile_ui_bll_skill")
 
-_SKILL_NAME = "compile_ui_bll"
+_SKILL_NAME = "compile_ui_bll_skill"
 _REPO = os.environ.get("STC_BUILD_ROOT", r"C:\work\testcenter")
 _LOCK = Path(_REPO) / ".git" / "index.lock"
 LOG_DIR = ROOT / "logs"
@@ -44,7 +44,7 @@ def checkout(commit):
 
 
 def build_parallel(commit):
-    """Start BLL and UI builds concurrently; each reports its own result as it finishes."""
+    """Start BLL and UI builds concurrently; each sub-step reports its own result."""
     short = commit["short_sha"]
     build_results = {}
 
@@ -64,8 +64,8 @@ def build_parallel(commit):
         build_results[label] = result
         html_reporter.record_step_result(commit, _SKILL_NAME, {"label": label, "result": result})
 
-    t_bll = threading.Thread(target=_build, args=("bd bll", "bd bll", "bll"), daemon=True)
-    t_ui  = threading.Thread(target=_build, args=("bd ui",  "bd ui",  "ui"),  daemon=True)
+    t_bll = threading.Thread(target=_build, args=("build bll", "bd bll", "bll"), daemon=True)
+    t_ui  = threading.Thread(target=_build, args=("build ui",  "bd ui",  "ui"),  daemon=True)
     t_bll.start()
     t_ui.start()
     t_bll.join()
@@ -73,6 +73,9 @@ def build_parallel(commit):
 
     overall = "pass" if all(v == "pass" for v in build_results.values()) else "fail"
     return {"label": "build", "result": overall}
+
+
+build_parallel.parallel = True
 
 
 def steps():

@@ -56,15 +56,9 @@ RESULT: {"label": "my label", "result": "pass"}
 RESULT: {"label": "my label", "result": "fail"}
 ```
 
-Or, for a long-running background process:
-
-```
-WAIT_FOR_PID: C:\path\to\process.pid
-```
-
 Rules:
-- Print the `RESULT:` or `WAIT_FOR_PID:` line bare — no surrounding text, no explanation.
-- A step that prints neither is treated as a failure.
+- Print the `RESULT:` line bare — no surrounding text, no explanation.
+- A step that prints no `RESULT:` line is treated as a failure.
 - Do **not** instruct Claude to check previous step results or decide whether to continue — the runner controls step sequencing.
 
 ### Which format to use?

@@ -1,6 +1,5 @@
 """result_runner.py — Result Process: HTTP+SSE server.
-Receives step results from skill_runner, updates results.html, pushes SSE to browser.
-Replays result_queue.jsonl on startup to restore state across restarts."""
+Receives step results from skill_runner, updates results.html, pushes SSE to browser."""
 
 import http.server
 import json
@@ -21,7 +20,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 import logging_utils
 
 RESULT_HTML = ROOT / "results.html"
-RESULT_QUEUE = ROOT / "state" / "result_queue.jsonl"
 BROWSER_FLAG = ROOT / "state" / "browser_opened.flag"
 LOG_FILE = ROOT / "logs" / "result_runner.log"
 PORT = 8099
@@ -92,7 +90,6 @@ _ROW_MARKER = "<!-- ROWS -->"
 
 _state_lock = threading.Lock()
 _pending = {}   # sha → {sha, short_sha, author, repo, timestamp, skills: [...]}
-_replaying = False  # suppresses flush during queue replay
 
 # ── SSE ───────────────────────────────────────────────────────────────────────
 
@@ -108,7 +105,7 @@ def _sse_notify():
                 q.put_nowait("update")
             except queue.Full:
                 dead.add(q)
-        _sse_clients -= dead
+        _sse_clients.difference_update(dead)
 
 
 # ── Rendering ─────────────────────────────────────────────────────────────────
@@ -147,6 +144,11 @@ def _render_skills_cell(entry):
         for step in steps:
             label = step["label"]
             val_html = _render_value(step["result"])
+            link = step.get("link")
+            if link:
+                uri = Path(link).as_uri()
+                name = Path(link).name
+                val_html += f' <a href="{uri}">[{name}]</a>'
             parts.append(
                 f'<span class="step-result">'
                 f'<span class="step-label">{label}</span>: {val_html}'
@@ -195,7 +197,7 @@ def _write_html():
 
 def _flush(sha):
     """Regenerate results.html and push SSE. Called under _state_lock."""
-    if _replaying or sha not in _pending:
+    if sha not in _pending:
         return
     _write_html()
     _sse_notify()
@@ -257,6 +259,7 @@ def _op_step_result(commit, skill_name, payload):
 
     label  = payload.get("label", "unknown")
     result = payload.get("result", "unknown")
+    link   = payload.get("link")
     status = "fail" if str(result).lower() in ("fail", "failed") else "pass"
 
     # Label-exact match first — lets parallel sub-steps each update their own entry
@@ -264,6 +267,8 @@ def _op_step_result(commit, skill_name, payload):
         if step["status"] == "running" and step["label"] == label:
             step["result"] = result
             step["status"] = status
+            if link:
+                step["link"] = link
             break
     else:
         # Fallback: update the last running step (normal sequential case)
@@ -272,6 +277,8 @@ def _op_step_result(commit, skill_name, payload):
                 step["label"]  = label
                 step["result"] = result
                 step["status"] = status
+                if link:
+                    step["link"] = link
                 break
         else:
             log.warning("step_result with no running step for '%s/%s' — ignored", skill_name, label)
@@ -286,55 +293,16 @@ def _op_skill_finish(commit, skill_name, status):
     _flush(commit["sha"])
 
 
-# ── Dispatch tables ───────────────────────────────────────────────────────────
+# ── Dispatch table ────────────────────────────────────────────────────────────
 
 _PATH_DISPATCH = {
-    "/api/skill_start":  ("skill_start",  ["commit", "skill_name"],                 _op_skill_start,                             True),
-    "/api/step_start":   ("step_start",   ["commit", "skill_name", "step_header"],  _op_step_start,                              False),
-    "/api/step_result":  ("step_result",  ["commit", "skill_name", "payload"],      _op_step_result,                             False),
+    "/api/skill_start":  ("skill_start",  ["commit", "skill_name"],                 _op_skill_start,                               True),
+    "/api/step_start":   ("step_start",   ["commit", "skill_name", "step_header"],  _op_step_start,                                False),
+    "/api/step_result":  ("step_result",  ["commit", "skill_name", "payload"],      _op_step_result,                               False),
     "/api/skill_pass":   ("skill_pass",   ["commit", "skill_name"],                 lambda c, sn: _op_skill_finish(c, sn, "pass"), False),
     "/api/skill_fail":   ("skill_fail",   ["commit", "skill_name"],                 lambda c, sn: _op_skill_finish(c, sn, "fail"), False),
-    "/api/commit_done":  ("commit_done",  ["sha"],                                  None,                                        False),
+    "/api/commit_done":  ("commit_done",  ["sha"],                                  None,                                          False),
 }
-_TYPE_DISPATCH = {ev_type: (keys, op) for ev_type, keys, op, _ in _PATH_DISPATCH.values()}
-
-
-# ── Queue persistence ─────────────────────────────────────────────────────────
-
-def _append_queue(event):
-    RESULT_QUEUE.parent.mkdir(parents=True, exist_ok=True)
-    with open(RESULT_QUEUE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(event) + "\n")
-
-
-def _replay_queue():
-    """Rebuild _pending from saved events; write HTML once at the end. Called under _state_lock."""
-    global _replaying
-    if not RESULT_QUEUE.exists():
-        return
-    log.info("Replaying %s", RESULT_QUEUE)
-    _replaying = True
-    try:
-        with open(RESULT_QUEUE, "r", encoding="utf-8") as f:
-            for raw in f:
-                raw = raw.strip()
-                if not raw:
-                    continue
-                try:
-                    ev = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                t = ev.get("type")
-                entry = _TYPE_DISPATCH.get(t)
-                if entry:
-                    keys, op = entry
-                    if op is not None:
-                        op(*[ev[k] for k in keys])
-    finally:
-        _replaying = False
-    if _pending:
-        _write_html()
-    log.info("Replay done — %d commits in state", len(_pending))
 
 
 # ── Browser auto-open ─────────────────────────────────────────────────────────
@@ -386,7 +354,6 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         try:
             ev_type, keys, op, open_browser = dispatch
             ev = {"type": ev_type, **{k: body[k] for k in keys}}
-            _append_queue(ev)
             if op is not None:
                 with _state_lock:
                     op(*[ev[k] for k in keys])
@@ -447,6 +414,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
 
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -456,10 +429,6 @@ log = logging.getLogger("result_runner")
 def main():
     logging_utils.setup_logging(LOG_FILE, "result_runner")
     log.info("result_runner starting  pid=%d", os.getpid())
-
-    with _state_lock:
-        _replay_queue()
-
     server = _ThreadingHTTPServer(("localhost", PORT), _Handler)
     log.info("Listening on http://localhost:%d", PORT)
     try:
